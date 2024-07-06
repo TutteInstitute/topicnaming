@@ -308,7 +308,7 @@ def contrastive_subtopics_for_cluster(
     distinctive_sentences = [topic_names[i] for i in distinctive_topic_indices]
     return distinctive_sentences
 
-def create_final_remedy_prompt(original_topic_names, docs, vector_array, pointset, centroid_vector, doc_type, corpus_type):
+def create_final_remedy_prompt(original_topic_names, docs, vector_array, pointset, centroid_vector, doc_type, corpus_type, llm_instruction="A better and more specific name that still captures the topic of these article titles is:"):
     sentences = topical_sentences_for_cluster(docs, vector_array, pointset, centroid_vector, n_sentence_examples=64)
     prompt_text = f"A set of {doc_type} from {corpus_type} was described as having a topic of one of " + ", ".join(original_topic_names) + ".\n"
     prompt_text += "These topic names were not specific enough and were shared with other different but similar groups of titles.\n"
@@ -317,7 +317,7 @@ def create_final_remedy_prompt(original_topic_names, docs, vector_array, pointse
         prompt_text += f"- {sentence}\n"
 
     prompt_text += f"\n\nThe current name for this topic of these paragraphs is: {original_topic_names[-1]}\n"
-    prompt_text += "A better and more specific name that still captures the topic of these article titles is: "
+    prompt_text += "\n" + llm_instruction
     return prompt_text
 
 def trim_text(text, llm, token_trim_length):
@@ -330,7 +330,7 @@ def trim_text(text, llm, token_trim_length):
     This function tokenizes a string then trims off all tokens beyond a certain length specified by token_trim_length 
     and maps it back to a string.
     """
-    tokenized = llm.tokenize(text.encode('utf-8'))
+    tokenized = llm.tokenize(text)
     return llm.detokenize(tokenized[:token_trim_length])
 
 
@@ -388,7 +388,7 @@ class TopicNaming:
         self.document_vectors = document_vectors
         self.document_map = document_map
         if (cluster_layers is not None) and (type(cluster_layers).__name__!= 'ClusterLayers'):
-            raise ValueError(f'cluster_layers must be of type ClusterLayers class not {type(a).__name__}')
+            raise ValueError(f'cluster_layers must be of type ClusterLayers class not {type(cluster_layers).__name__}')
         if cluster_layers:
             self.cluster_layers_ = cluster_layers
         self.representation_techniques = representation_techniques
@@ -403,12 +403,12 @@ class TopicNaming:
         self.keyphrase_min_occurrences = keyphrase_min_occurrences
         self.keyphrase_ngram_range = keyphrase_ngram_range
         #Determine trim length used
-        self.token_distribution = [len(llm.tokenize(text.encode('utf-8'))) for text in documents]
+        self.token_distribution = [len(llm.tokenize(text)) for text in documents]
         self.token_trim_length = int(np.percentile(self.token_distribution, trim_percentile))
         if trim_length:
             self.token_trim_length = np.max([self.token_trim_length, trim_length])
         if trim_length > self.llm.n_ctx():
-            warn(f"trim_length of {self.token_trim_length} > max context window {self.llm.n_ctx()} setting it to half of the maximum context window.")
+            warnings.warn(f"trim_length of {self.token_trim_length} > max context window {self.llm.n_ctx()} setting it to half of the maximum context window.")
             self.token_trim_length = self.llm.n_ctx()//2
             
     def trim_text(self, text):
@@ -546,10 +546,10 @@ class TopicNaming:
             elif rep == 'contrastive':
                 self.representation_[rep] = self.get_contrastive_keyword_layers()
             else:
-                 warn(f'{rep} is not a supported representation')
+                 warnings.warn(f'{rep} is not a supported representation')
         return None
 
-    def build_base_prompt(self, cluster_id, layer_id=0, max_docs_per_cluster=100, max_adjacent_clusters=3, max_adjacent_docs=2):
+    def build_base_prompt(self, cluster_id, layer_id=0, max_docs_per_cluster=100, max_adjacent_clusters=3, max_adjacent_docs=2, llm_instruction="The short distinguising topic name is:"):
         """
         Take a cluster_id and layer_id and extracts the relevant information from the representation_ and cluster_layers_ properties to 
         construct a representative prompt to present to a large langauge model.
@@ -570,7 +570,7 @@ class TopicNaming:
                 prompt_text += f" - \"{self.trim_text(text)}\"\n"
             # Grab some of the same docs from nearby clusters for context.
             prompt_text += f"\n\nSimilar {self.document_type} from different groups with distinct topics include:\n"
-            for adjacent_cluster_index in self.cluster_layers_.layer_cluster_neighbours[layer_id][cluster_id][:max_adjacent_clusters]:
+            for adjacent_cluster_index in self.cluster_layers_.layer_cluster_neighbours[layer_id][cluster_id][1:max_adjacent_clusters]:
                 for text in self.representation_['topical'][layer_id][adjacent_cluster_index][:max_adjacent_docs]:
                     prompt_text += f"- \"{self.trim_text(text)}\"\n"                        
         # Add some documents from nearby clusters for contrast
@@ -578,16 +578,11 @@ class TopicNaming:
             prompt_text += f"\nSample distinctive {self.document_type} from the group include:\n"
             for text in self.representation_['distinctive'][layer_id][cluster_id][:max_docs_per_cluster]:
                 prompt_text += f" - \"{self.trim_text(text)}\"\n"
-            # prompt_text += f"\n\nSimilar {self.document_type} from different groups with distinct topics include:\n"
-            # for adjacent_cluster_index in self.cluster_layers_.layer_cluster_neighbours[layer_id][cluster_id][:max_adjacent_clusters]:
+            prompt_text += f"\n\nSimilar {self.document_type} from different groups with distinct topics include:\n"
+            # for adjacent_cluster_index in self.cluster_layers_.layer_cluster_neighbours[layer_id][cluster_id][1:max_adjacent_clusters]:
             #     for text in self.representation_['distinctive'][layer_id][adjacent_cluster_index][:max_adjacent_docs]:
             #         prompt_text += f"- \"{text}\"\n"
-        prompt_text += "\n\nThe short distinguishing topic name for the group "
-        # If we have contrastive keyword, reiterate them here.
-        if 'contrastive' in self.representation_techniques:
-            prompt_text += "that had the keywords:\n -  \""
-            prompt_text += ", ".join(self.representation_['contrastive'][layer_id][cluster_id][:8]) + "\" \n"
-        prompt_text += "is:\n"
+        prompt_text += "\n\n" + llm_instruction
         return prompt_text
         
     
@@ -613,17 +608,17 @@ class TopicNaming:
         prompts = []
         for cluster_id in range(layer_size):
             prompt = self.build_base_prompt(cluster_id, layer_id, max_docs_per_cluster, max_adjacent_clusters, max_adjacent_docs)
-            prompt_length = len(self.llm.tokenize(prompt.encode('utf-8')))
+            prompt_length = len(self.llm.tokenize(prompt))
             reduced_docs_per_cluster = max_docs_per_cluster
             while prompt_length > self.llm.n_ctx():
                 reduced_docs_per_cluster = reduced_docs_per_cluster//2
-                prompt = self.build_base_prompt(cluster_id, layer_id, reduced_docs_per_cluster, max_adjacent_clusters, max_adjacent_docs)
-                prompt_length = len(self.llm.tokenize(prompt.encode('utf-8')))
-                if reduced_docs_per_cluster<1:
+                prompt = self.build_base_prompt(cluster_id, layer_id, reduced_docs_per_cluster, max_adjacent_clusters, max_adjacent_docs, self.llm.llm_instruction(kind="base_layer"))
+                prompt_length = len(self.llm.tokenize(prompt))
+                if reduced_docs_per_cluster < 1:
                     warnings.warn(f"A prompt was too long for the context window and was trimmed: {prompt_length}> {self.llm.n_ctx()}")
                     prompt = trim_text(prompt, self.llm, self.llm.n_ctx())
             prompts.append(prompt)
-        prompt_lengths = [len(self.llm.tokenize(prompt.encode('utf-8'))) for prompt in prompts]
+        prompt_lengths = [len(self.llm.tokenize(prompt)) for prompt in prompts]
         self.base_layer_prompts_ = prompts
         return None
 
@@ -633,11 +628,7 @@ class TopicNaming:
         """
         topic_names = []
         for i in tqdm(range(len(prompt_layer))):
-            topic_name = self.llm(prompt_layer[i])['choices'][0]['text']
-            if "\n" in topic_name:
-                topic_name = topic_name.lstrip("\n ")
-                topic_name = topic_name.split("\n")[0]
-            topic_name = string.capwords(topic_name.strip(string.punctuation + string.whitespace))
+            topic_name = self.llm.generate_topic_name(prompt_layer[i])
             topic_names.append(topic_name)
         return topic_names
 
@@ -695,7 +686,8 @@ class TopicNaming:
                                          max_subtopics=24,
                                          max_docs_per_cluster=4,
                                          max_adjacent_clusters=3,
-                                         max_adjacent_docs=2
+                                         max_adjacent_docs=2,
+                                         llm_instruction="The short distinguising topic name is:"
                                         ):
         if getattr(self, 'subtopic_layers_', None) is None:
             self.fit_subtopic_layers()
@@ -728,14 +720,9 @@ class TopicNaming:
      
             prompt_text += "\nSub-topics from different but similar groups include:\n"
             for adjacent_cluster_index in self.cluster_layers_.layer_cluster_neighbours[layer_id][cluster_id][:max_adjacent_clusters]:
-                for text in previous_layer_topics[adjacent_cluster_index][:max_subtopics]:
+                for text in previous_layer_topics[adjacent_cluster_index][1:max_subtopics]:
                     prompt_text += f"- \"{text}\"\n"    
-            prompt_text += "\n\nThe short distinguishing topic name for the group "
-            # If we have contrastive keyword, reiterate them here.
-            if 'contrastive' in self.representation_techniques:
-                prompt_text += "that had the keywords:\n -  \""
-                prompt_text += ", ".join(self.representation_['contrastive'][layer_id][cluster_id][:8]) + "\" \n"
-            prompt_text += "is:\n"
+            prompt_text += "\n\n" + llm_instruction
             prompts.append(prompt_text)
         return prompts    
     
@@ -756,11 +743,13 @@ class TopicNaming:
         
         for layer_id in range(1,len(self.cluster_layers_.metacluster_layers)):
             subtopics_layer = [a + b for a,b in zip(self.subtopic_layers_['topical'][layer_id-1], self.subtopic_layers_['contrastive'][layer_id-1])]
-            topic_naming_prompts = self.create_prompt_from_subtopics(subtopics_layer, layer_id)
+            topic_naming_prompts = self.create_prompt_from_subtopics(
+                subtopics_layer, 
+                layer_id, 
+                llm_instruction=self.llm.llm_instruction(kind="intermediate_layer")
+            )
             self.topic_prompt_layers_.append(topic_naming_prompts)
             topic_names = self.get_topic_name(topic_naming_prompts)
-            # if(self.verbose):
-            #     print(topic_names)
             self.topic_name_layers_.append(topic_names)
         return None
 
@@ -775,7 +764,7 @@ class TopicNaming:
         if self.verbose:
             print(f'cleaning up topic names\n')
         self.layer_clusters = [np.full(self.document_map.shape[0], "Unlabelled", dtype=object) for i in range(len(self.topic_name_layers_))]
-        unique_names = set([])
+        unique_names = set([""]) # Start with empty string so we fix any topics that failed to get a name
         for n in range(len(self.topic_name_layers_) - 1, -1, -1):
             print(f"Working on layer {n}")
             for i, (name, indices) in enumerate(zip(self.topic_name_layers_[n], self.cluster_layers_.pointset_layers[n])):
@@ -793,13 +782,10 @@ class TopicNaming:
                         indices, 
                         self.cluster_layers_.vector_layers[n][i], 
                         self.document_type, 
-                        self.corpus_description
+                        self.corpus_description,
+                        self.llm.llm_instruction(kind="remedy")
                     )
-                    unique_name = self.llm(prompt_text, max_tokens=36)['choices'][0]['text']
-                    if "\n" in unique_name:
-                        unique_name = unique_name.lstrip("\n ")
-                        unique_name = unique_name.split("\n")[0]
-                    unique_name = string.capwords(unique_name.strip(string.punctuation + string.whitespace))
+                    unique_name = self.llm.generate_topic_name(prompt_text)
                     original_topic_names.append(unique_name)
                     n_attempts += 1
                 if n_attempts > 0:
